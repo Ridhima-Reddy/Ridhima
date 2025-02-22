@@ -1,0 +1,54 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import cv2
+
+a1 = plt.imread('img3')
+b1 = np.array(a1)
+
+i1,i2,i3= b.shape
+
+c3 = b1[:,:,0]
+c4 = b1[:,:,2]
+c1 = np.reshape(c3,(i1*i2))
+c2 = np.reshape(c4,(i1*i2))
+
+d =[]
+for i in range(len(c1)):
+  d1 = c1[i]&c2[i]
+  d.append(d1)
+
+d2 = np.array(d)
+d3 = np.reshape(d2,(i1,i2))
+
+e =[]
+for i in range(len(c1)):
+  e1 = c1[i]|c2[i]
+  e.append(e1)
+
+e2 = np.array(e)
+e3 = np.reshape(e2,(i1,i2))
+
+fig = plt.figure(figsize=(10, 7))
+
+rows = 2
+columns = 2
+
+fig.add_subplot(rows, columns, 1)
+plt.imshow(c3)
+plt.axis('off')
+plt.title("red channel")
+
+fig.add_subplot(rows, columns, 2)
+plt.imshow(c4)
+plt.axis('off')
+plt.title("blue channel")
+
+fig.add_subplot(rows, columns, 3)
+plt.imshow(d3)
+plt.axis('off')
+plt.title("bitwise and operand")
+
+fig.add_subplot(rows, columns, 4)
+plt.imshow(e3)
+plt.axis('off')
+plt.title("bitwise or operand")
