@@ -1,0 +1,10 @@
+import math
+import matplotlib.pyplot as plt
+x = [i / 10 for i in range(-40, 41)]
+skewness = 1
+pdf = [math.exp(-(x_val - skewness) ** 2 / 2) for x_val in x]
+plt.plot(x, pdf,color='blue',marker='o')
+plt.title("Skewed Distribution Curve")
+plt.xlabel("X-axis")
+plt.ylabel("Probability Density")
+plt.show()
