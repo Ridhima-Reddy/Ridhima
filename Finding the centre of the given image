@@ -1,0 +1,28 @@
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+
+a1 = cv2.imread('img3.jpeg')
+height,width,channels = a1.shape
+
+if height%2 != 0:
+ a = [height//2]
+else:
+  a = [height//2 - 1, height//2]
+
+if width%2 != 0 :
+  b = [width//2]
+else:
+  b = [width//2 - 1, width//2]
+
+if channels%2 != 0 :
+  c = [channels//2]
+else:
+  c = [channels//2 - 1, channels//2]
+
+print("The coordinates of the centre pixel:")
+
+for i in range(len(a)):
+  for j in range(len(b)):
+    for k in range(len(c)):
+      print((a[i]+1,b[j]+1,c[k]+1))
