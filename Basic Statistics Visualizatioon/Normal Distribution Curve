@@ -1,0 +1,9 @@
+import numpy as np
+import matplotlib.pyplot as plt
+x = np.linspace(-4, 4, 200)
+pdf = (1 / np.sqrt(2 * np.pi)) * np.exp(-0.5 * x**2)
+plt.plot(x, pdf, color='blue',marker='*')
+plt.title("Normal Distribution Curve")
+plt.xlabel("X-axis")
+plt.ylabel("Probability Density")
+plt.show()
