@@ -1,0 +1,13 @@
+import math
+import matplotlib.pyplot as plt
+x = [i / 10 for i in range(-20, 21)]
+mean = 6
+std = 3
+z_scores = [(x_val - mean) / std for x_val in x]
+pdf = [math.exp(-0.5 * z**2) / (std * math.sqrt(2 * math.pi)) for z in z_scores]
+plt.plot(x, pdf, color='black',marker='o')
+plt.title("Z-Score Curve")
+plt.xlabel("X-axis")
+plt.ylabel("Probability Density")
+plt.show()
+
