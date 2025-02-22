@@ -1,0 +1,30 @@
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+
+a1 = plt.imread('img3.jpeg')
+height,width,channels = a1.shape
+mp = height//2
+if height%2 !=0:
+ i1 = a1[:mp+1,:,:]
+ i2 = a1[mp:,:,:]
+
+else:
+  i1 = a1[:mp,:,:]
+  i2 = a1[mp:,:,:]
+
+fig = plt.figure(figsize=(10, 7))
+
+rows = 2
+columns = 2
+fig.add_subplot(rows, columns, 1)
+
+plt.imshow(i1)
+plt.axis('off')
+plt.title("upper half")
+
+fig.add_subplot(rows, columns, 2)
+
+plt.imshow(i2)
+plt.axis('off')
+plt.title("lower half")
