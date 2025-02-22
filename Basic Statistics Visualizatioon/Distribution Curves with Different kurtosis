@@ -1,0 +1,16 @@
+import math
+import matplotlib.pyplot as plt
+x = [i / 10 for i in range(-20, 41)]
+kurtosis_values = [-3, 1, -1]
+colors = ['red', 'blue', 'green']
+for kurtosis, color in zip(kurtosis_values, colors):
+ pdf = [math.exp(-0.5 * (x_val - kurtosis)**2) for x_val in x]
+ plt.plot(x, pdf, color=color, label=f'kurtosis = {kurtosis}')
+
+plt.title("Distribution Curves with Different kurtosis")
+plt.xlabel("X-axis")
+plt.ylabel("Probability Density")
+
+plt.legend()
+
+plt.show()
