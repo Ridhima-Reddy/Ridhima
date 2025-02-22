@@ -1,0 +1,19 @@
+! pip install aspose.words
+
+import cv2
+from google.colab.patches import cv2_imshow
+
+img = cv2.imread("R.png")
+img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+img = cv2.Canny(img,100,200)
+img = 255 - img
+cv2.imwrite("img.jpg", img)
+
+import aspose.words as aw
+
+doc = aw.Document()
+builder = aw.DocumentBuilder(doc)
+
+shape = builder.insert_image("/content/img.jpg")
+shape.image_data.save("img.svg")
+
