@@ -1,0 +1,8 @@
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+
+a1 = plt.imread('img3.jpeg')
+b = np.array(a1)
+c = np.pad(b,20,constant_values=255)
+plt.imshow(c[:,:,20:23])
