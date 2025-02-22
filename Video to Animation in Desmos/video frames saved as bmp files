@@ -1,0 +1,43 @@
+import cv2
+import os
+
+def extract_frames(input_video_path, output_folder, fps=10):
+    # Open video using OpenCV
+    cap = cv2.VideoCapture(input_video_path)
+
+    # Get video properties
+    fps_original = cap.get(cv2.CAP_PROP_FPS)
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Set the desired output video fps
+    output_fps = fps
+
+    # Create output folder
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Read and save frames as BMP images
+    frame_count = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Check if it's time to capture a frame based on desired fps
+        if frame_count % int(fps_original / fps) == 0:
+            # Save the frame as BMP
+            frame_filename = f"{output_folder}/frame_{frame_count}.bmp"
+            cv2.imwrite(frame_filename, frame)
+
+        frame_count += 1
+
+    # Release resources
+    cap.release()
+    cv2.destroyAllWindows()
+
+    print(f"Frames extracted and saved to: {output_folder}")
+
+# Example usage
+input_video_path = ""C:\Users\ridhi\Downloads\Anime Badass Moments TikTok compilation.mp4""
+output_folder = "/path/to/save/frames"
+extract_frames(input_video_path, output_folder)
