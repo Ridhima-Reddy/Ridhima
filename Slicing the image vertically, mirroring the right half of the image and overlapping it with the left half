@@ -1,0 +1,59 @@
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+
+a = cv2.imread('img3')
+a1 = np.array(a)
+height,width,channels = a1.shape
+mp = width//2
+if width%2 !=0:
+ i1 = a1[:,:mp + 1,:]
+ i2 = a1[:,mp:,:]
+
+else:
+  i1 = a1[:,:mp,:]
+  i2 = a1[:,mp:,:]
+
+i3 = cv2.cvtColor(i1, cv2.COLOR_BGR2HSV)
+i4 = cv2.cvtColor(i2, cv2.COLOR_BGR2RGB)
+
+fig = plt.figure(figsize=(10, 7))
+
+rows = 2
+columns = 2
+
+fig.add_subplot(rows, columns, 1)
+
+plt.imshow(i3)
+plt.axis('off')
+plt.title("left half")
+plt.savefig('left half')
+fig.add_subplot(rows, columns, 2)
+
+plt.imshow(i4)
+plt.axis('off')
+plt.title("right half")
+
+i5=np.array(i4)
+i6=[]
+for i in range(0,802):
+  l=354
+  for j in range(0,355):
+    i7=i5[i,l]
+    i6.append(i7)
+    l-=1
+i7=np.array(i6)
+i8=np.array(i7).reshape(802,355,3)
+
+fig.add_subplot(rows, columns, 3)
+plt.imshow(i8)
+plt.axis('off')
+plt.title(" mirrored right half")
+plt.savefig('mirrored right half')
+
+i9 = cv2.addWeighted(i3, 0.3, i8, 0.7, 0.0)
+fig.add_subplot(rows, columns, 4)
+plt.imshow(i9)
+plt.axis('off')
+plt.title("overlap")
+
