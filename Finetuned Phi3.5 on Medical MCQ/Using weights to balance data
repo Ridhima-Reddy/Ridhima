@@ -1,0 +1,294 @@
+!pip install unsloth
+!pip install "unsloth @ git+https://github.com/unslothai/unsloth.git"
+!pip install --no-deps "xformers==0.0.27" trl peft accelerate bitsandbytes
+!pip uninstall xformers -y
+!pip3 install -U xformers --index-url https://download.pytorch.org/whl/cu126
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name = "microsoft/Phi-3.5-mini-instruct",
+    max_seq_length = max_seq_length,
+    dtype = torch.bfloat16,
+    device_map = {"": torch.cuda.current_device()}
+)
+model = FastLanguageModel.get_peft_model(
+    model,
+    r = 16,
+    target_modules = ["q_proj", "k_proj","v_proj", "o_proj", "gate_proj","up_proj","down_proj"],
+    lora_alpha = 32,
+    lora_dropout = 0.1,
+    bias = "none",
+    use_gradient_checkpointing = "unsloth",
+    random_state = 3407,
+    use_rslora = False,
+    loftq_config = None,
+)
+from datasets import load_dataset
+dataset = load_dataset("json", data_files="converted_train_merged.jsonl", split="train") ###replace with your training_data
+
+class_weights = {
+    " A": 0.4,
+    " B": 0.4,
+    " C": 0.4,
+    " D": 0.5
+}
+
+def compute_sample_weight(example):
+    weight = 1.0  # default weight
+
+    try:
+        answer = example["conversations"][-1]["value"].strip()
+        token = f" {answer}"  # prepend space to match tokenizer output
+        weight = class_weights.get(token, 1.0)
+    except Exception as e:
+        print(f"[WARN] Could not extract answer from: {example['conversations']}")
+        # Keep default weight
+
+    example["weight"] = weight
+    return example
+train_dataset = dataset.map(compute_sample_weight)
+train_dataset[0]
+from unsloth.chat_templates import get_chat_template
+tokenizer = get_chat_template(
+    tokenizer,
+    chat_template = "phi-3",
+    mapping = {
+        "role": "from",
+        "content": "value",
+        "user": "human",
+        "assistant": "gpt"
+
+    }
+)
+
+def formatting_prompts_func(examples):
+    convos = examples["conversations"]
+    
+    # Generate plain text from chat template
+    texts = [
+        tokenizer.apply_chat_template(
+            convo, tokenize=False, add_generation_prompt=False
+        ) for convo in convos
+    ]
+    
+    # Tokenize the text batch
+    tokenized = tokenizer(texts, truncation=True)
+
+    # Pass along weights (should be a list of floats with same length as batch)
+    tokenized["weight"] = examples["weight"]
+
+    return tokenized
+pass
+mapped_dataset = train_dataset.map(formatting_prompts_func, batched=True)
+unsloth_template = """
+{{ bos_token }}
+You are a medical assistant answering multiple choice questions.\n
+{% for message in messages %}
+    {% if message['from'] == 'human' %}
+        {{ '### Question:\n' + message['value'] + '\n' }}
+    {% else %}
+        {{ '### Answer: ' + message['value'] + eos_token + '\n' }}
+    {% endif %}
+{% endfor %}
+"""
+unsloth_eos_token = "eos_token"
+
+if False:
+    tokenizer = get_chat_template(
+    tokenizer,
+    chat_template = unsloth_template,
+    eos_token = unsloth_eos_token,
+    mapping = {
+        "role": "from",
+        "content": "value",
+        "user": "human",
+        "assistant": "gpt"
+    },
+    map_eos_token = True
+    )
+
+    from transformers import DataCollatorForLanguageModeling
+
+mapped_dataset.set_format("torch", columns=["input_ids", "attention_mask", "weight"])
+
+class DataCollatorWithWeights(DataCollatorForLanguageModeling):
+    def __init__(self, tokenizer):
+        super().__init__(tokenizer=tokenizer, mlm=False)
+        
+def __call__(self, examples):
+    batch = super().__call__(examples)
+    weights = []
+    for ex in examples:
+        weights.append(ex["weight"])
+    batch["weight"] = torch.tensor(weights, dtype=torch.float)
+    return batch
+
+from trl import SFTTrainer
+import torch.nn.functional as F
+
+class SimpleWeightedSFT(SFTTrainer):
+    def __init__(self, *args, class_weights=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights  # tensor of size [vocab_size] or [num_classes]
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        inputs["labels"] = inputs["input_ids"].clone()
+        labels = inputs["labels"]
+        weights = inputs.data.get("weight")
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        # Shift tokens for LM loss
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        attention_mask = inputs["attention_mask"][..., 1:].contiguous()
+
+        # Raw loss (no reduction)
+        token_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            reduction='none'
+        ).view(shift_labels.size())
+
+              # Mask out padding
+        token_loss = token_loss * attention_mask
+        
+        # Sum per sequence
+        loss_per_sample = token_loss.sum(dim=1) / attention_mask.sum(dim=1)
+        
+        # Apply per-sample weight here
+        if "weight" in inputs:
+            sample_weights = inputs["weight"].to(loss_per_sample.device)
+            loss_per_sample = loss_per_sample * sample_weights
+        
+        # Final loss
+        final_loss = loss_per_sample.mean()
+        
+        return (final_loss, outputs) if return_outputs else final_loss
+
+from trl import SFTTrainer
+from transformers import TrainingArguments
+from unsloth import is_bfloat16_supported
+
+trainer = SimpleWeightedSFT(
+    model = model,
+    tokenizer = tokenizer,
+    train_dataset= mapped_dataset,
+    data_collator=DataCollatorWithWeights(tokenizer=tokenizer),
+    max_seq_length = max_seq_length,
+    dataset_num_proc = 2,
+    packing = False,
+
+    args = TrainingArguments(
+        per_device_train_batch_size = 2,
+        gradient_accumulation_steps = 4,
+        warmup_steps = 5,
+        max_steps = 60,
+        learning_rate = 2e-4,
+        fp16 = not is_bfloat16_supported(),
+        bf16 = is_bfloat16_supported(),
+        logging_steps = 1,
+        optim = "adamw_8bit",
+        weight_decay = 0.01,
+        lr_scheduler_type = "linear",
+        seed = 3407,
+        output_dir = "outputs",
+    ),
+)
+
+trainer_stats = trainer.train()
+
+model.save_pretrained("lora_model_v5") # Local saving
+tokenizer.save_pretrained("lora_model_v5")
+# model.push_to_hub("your_name/lora_model", token = "...") # Online saving
+# tokenizer.push_to_hub("your_name/lora_model", token = "...") # Online saving
+
+
+from unsloth.chat_templates import get_chat_template
+
+tokenizer = get_chat_template(
+    tokenizer,
+    chat_template = "phi-3", # Supports zephyr, chatml, mistral, llama, alpaca, vicuna, vicuna_old, unsloth
+    mapping = {"role" : "from", "content" : "value", "user" : "human", "assistant" : "gpt"}, # ShareGPT style
+)
+
+FastLanguageModel.for_inference(model) # Enable native 2x faster inference
+
+messages = [
+    {
+        "from": "human",
+        "value": (
+            "Generally accepted indications for mechanical ventilatory support include\n\n"
+            "A. PaO2 of less than 70 kPa and PaCO2 of greater than 50 kPa while breathing room air\n"
+            "B. Alveolar-arterial oxygen tension difference of 150 kPa while breathing 100% O2\n"
+            "C. Vital capacity of 40-60 mL/kg\n"
+            "D. Respiratory rate greater than 35 breaths/min\n\n"
+            "Answer with the correct option (A/B/C/D) only."
+        )
+    }
+]
+
+inputs = tokenizer.apply_chat_template(
+    messages,
+    tokenize = True,
+    add_generation_prompt = True, # Must add for generation
+    return_tensors = "pt",
+).to("cuda")
+
+outputs = model.generate(input_ids = inputs, max_new_tokens = 64, use_cache = True)
+tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+from unsloth.chat_templates import get_chat_template
+from tqdm import tqdm
+import pandas as pd
+
+tokenizer = get_chat_template(
+    tokenizer,
+    chat_template = "phi-3", # Supports zephyr, chatml, mistral, llama, alpaca, vicuna, vicuna_old, unsloth
+    mapping = {"role" : "from", "content" : "value", "user" : "human", "assistant" : "gpt"}, # ShareGPT style
+)
+
+FastLanguageModel.for_inference(model) # Enable native 2x faster inference
+def format_question(item):
+    q = item["question"]
+    opts = item["options"]
+    opt_str = "\n".join([f"{k}. {opts[k]}" for k in sorted(opts)])
+    return (
+        f"{q}\n\n"
+        f"{opt_str}\n\n"
+        "Answer with the correct option (A/B/C/D) only."
+    )
+
+def get_answer(messages):
+    input_ids = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_tensors="pt"
+    ).to("cuda")
+    outputs = model.generate(
+            input_ids=input_ids,
+            max_new_tokens=1,         # Only want one token (A/B/C/D)
+            do_sample=False,
+            use_cache=True,
+        )
+    generated_ids = outputs[0][input_ids.shape[1]:]  # Get only new tokens
+    decoded = tokenizer.decode(generated_ids, skip_special_tokens=True).strip().upper()
+
+    if decoded in [chr(c) for c in range(ord("A"), ord("Z") + 1)]:
+        return decoded
+    else: None
+
+# Run through test data
+results = []
+for item in tqdm(combined_test_data): ###replace combined_test_data with your MCQ testdata
+    prompt = format_question(item)
+    messages = [{"from": "human", "value": prompt}]
+    answer = get_answer(messages)
+    results.append({"id": item["id"], "answer": answer})
+
+# Save to CSV
+df = pd.DataFrame(results)
+df.to_csv("answer.csv", index=False)
+print("Saved to answer.csv")
+
+
+    
