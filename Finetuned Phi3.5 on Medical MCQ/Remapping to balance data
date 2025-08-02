@@ -1,0 +1,231 @@
+!pip install unsloth
+!pip install "unsloth @ git+https://github.com/unslothai/unsloth.git"
+!pip install --no-deps "xformers==0.0.27" trl peft accelerate bitsandbytes
+!pip uninstall xformers -y
+!pip3 install -U xformers --index-url https://download.pytorch.org/whl/cu126
+!pip install --upgrade --force-reinstall --no-cache-dir --no-deps unsloth unsloth_zoo
+
+from unsloth import FastLanguageModel
+import torch
+max_seq_length = 2048
+dtype = None
+load_in_4bit = False
+
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name = "microsoft/Phi-3.5-mini-instruct",
+    max_seq_length = max_seq_length,
+    dtype = torch.bfloat16,
+    device_map = {"": torch.cuda.current_device()}
+)
+
+model = FastLanguageModel.get_peft_model(
+    model,
+    r = 8,
+    target_modules = ["q_proj", "k_proj","v_proj", "o_proj", "gate_proj","up_proj","down_proj"],
+    lora_alpha = 16,
+    lora_dropout = 0.05,
+    bias = "none",
+    use_gradient_checkpointing = "unsloth",
+    random_state = 3407,
+    use_rslora = True,
+    loftq_config = None,
+)
+
+from unsloth.chat_templates import get_chat_template
+tokenizer = get_chat_template(
+    tokenizer,
+    chat_template = "phi-3",
+    mapping = {
+        "role": "from",
+        "content": "value",
+        "user": "human",
+        "assistant": "gpt"
+
+    }
+)
+
+def formatting_prompts_func(examples):
+    convos = examples["conversations"]
+    texts = [tokenizer.apply_chat_template(convo, tokenize = False, add_generation_prompt = False) for convo in convos]
+    return { "text" : texts, }
+pass
+
+import random
+import re
+import copy
+
+def remap_chat_a_to_d(dataset, num_to_remap=40000, seed=42):
+    random.seed(seed)
+    
+    # Filter samples where the GPT answer is 'A'
+    a_label_samples = [ex for ex in dataset if ex["conversations"][-1]["value"].strip().upper() == "A"]
+    
+    if len(a_label_samples) < num_to_remap:
+        raise ValueError("Not enough A-labeled samples to remap.")
+
+    selected = random.sample(a_label_samples, num_to_remap)
+    updated_dataset = []
+
+    for ex in dataset:
+        if ex in selected:
+            new_ex = copy.deepcopy(ex)
+
+            # Extract the human message
+            question_text = new_ex["conversations"][0]["value"]
+
+            # Parse options
+            pattern = r"Options:\s*A\.\s*(.*?)\nB\.\s*(.*?)\nC\.\s*(.*?)\nD\.\s*(.*?)\n"
+            match = re.search(pattern, question_text, re.DOTALL)
+
+            if not match:
+                print("Skipping badly formatted question:")
+                print(question_text)
+                updated_dataset.append(ex)
+                continue
+
+            a, b, c, d = match.groups()
+
+            # Swap A and D
+            new_options_text = f"Options:\nA. {d}\nB. {b}\nC. {c}\nD. {a}\n"
+
+            # Replace the old options block in the text
+            new_question_text = re.sub(pattern, new_options_text, question_text, flags=re.DOTALL)
+
+            # Update the conversation
+            new_ex["conversations"][0]["value"] = new_question_text
+            new_ex["conversations"][-1]["value"] = "D"
+
+            updated_dataset.append(new_ex)
+        else:
+            updated_dataset.append(ex)
+
+    return updated_dataset
+
+from datasets import load_dataset
+import json
+
+# Load your .jsonl dataset
+imbalanced_dataset = load_dataset("json", data_files="converted_train_merged.jsonl", split="train") ### replace with your training dataset 
+dataset_list = imbalanced_dataset.to_list()
+
+# Remap 40k A-labels → D
+remapped_dataset = remap_chat_a_to_d(dataset_list, num_to_remap=35000)
+
+def validate_correct_answers_all(original_list, remapped_list):
+    assert len(original_list) == len(remapped_list), "Mismatch in dataset lengths!"
+    
+    total = len(original_list)
+    mismatches = 0
+
+    for i, (orig, remap) in enumerate(zip(original_list, remapped_list)):
+        orig_q = orig["conversations"][0]["value"]
+        remap_q = remap["conversations"][0]["value"]
+        orig_ans = orig["conversations"][-1]["value"].strip().upper()
+        remap_ans = remap["conversations"][-1]["value"].strip().upper()
+
+        # Regex to extract option texts
+        o_match = re.search(r"Options:\s*A\.\s*(.*?)\nB\.\s*(.*?)\nC\.\s*(.*?)\nD\.\s*(.*?)\n", orig_q, re.DOTALL)
+        r_match = re.search(r"Options:\s*A\.\s*(.*?)\nB\.\s*(.*?)\nC\.\s*(.*?)\nD\.\s*(.*?)\n", remap_q, re.DOTALL)
+
+        if not o_match or not r_match:
+            print(f"❌ Skipped badly formatted sample at index {i}")
+            continue
+
+        orig_options = dict(zip(["A", "B", "C", "D"], [re.sub(r"\s+", " ", o_match.group(j)).strip() for j in range(1, 5)]))
+        remap_options = dict(zip(["A", "B", "C", "D"], [re.sub(r"\s+", " ", r_match.group(j)).strip() for j in range(1, 5)]))
+
+
+        orig_answer_text = orig_options.get(orig_ans)
+        remap_answer_text = remap_options.get(remap_ans)
+
+        if orig_answer_text != remap_answer_text:
+            mismatches += 1
+            print(f"❌ Mismatch at index {i}:")
+            print(f"    Original answer [{orig_ans}]: {orig_answer_text}")
+            print(f"    Remapped answer [{remap_ans}]: {remap_answer_text}")
+
+    if mismatches == 0:
+        print(f"✅ All {total} samples match correctly.")
+    else:
+        print(f"⚠️ {mismatches}/{total} samples have mismatched answer texts.")
+
+validate_correct_answers_all(dataset_list, remapped_dataset)
+
+remapped_dataset[92755]["conversations"][0]["value"] = remapped_dataset[92755]["conversations"][0]["value"].replace(
+    "T", "T 1"
+)
+remapped_dataset[124660]["conversations"][0]["value"] = remapped_dataset[124660]["conversations"][0]["value"].replace(
+    "l", "l st part of maxillary artery"
+)
+remapped_dataset[164141]["conversations"][0]["value"] = remapped_dataset[164141]["conversations"][0]["value"].replace(
+    "3", "3 rd cranial nerve"
+)
+
+with open("converted_train_balanced.jsonl", "w") as f:
+    for item in remapped_dataset:
+        f.write(json.dumps(item) + "\n")
+
+balanced_dataset = load_dataset("json", data_files="converted_train_balanced.jsonl", split="train")
+balanced_dataset = balanced_dataset.map(formatting_prompts_func, batched=True)
+unsloth_template = """
+{{ bos_token }}
+You are a medical assistant answering multiple choice questions.\n
+{% for message in messages %}
+    {% if message['from'] == 'human' %}
+        {{ '### Question:\n' + message['value'] + '\n' }}
+    {% else %}
+        {{ '### Answer: ' + message['value'] + eos_token + '\n' }}
+    {% endif %}
+{% endfor %}
+"""
+unsloth_eos_token = "eos_token"
+
+if False:
+    tokenizer = get_chat_template(
+    tokenizer,
+    chat_template = unsloth_template,
+    eos_token = unsloth_eos_token,
+    mapping = {
+        "role": "from",
+        "content": "value",
+        "user": "human",
+        "assistant": "gpt"
+    },
+    map_eos_token = True
+    )
+from trl import SFTTrainer
+from transformers import TrainingArguments
+from unsloth import is_bfloat16_supported
+
+trainer = SFTTrainer(
+    model = model,
+    tokenizer = tokenizer,
+    train_dataset = balanced_dataset,
+    dataset_text_field = "text",
+    max_seq_length = max_seq_length,
+    dataset_num_proc = 2,
+    packing = False, # Can make training 5x faster for short sequences.
+
+    args = TrainingArguments(
+        per_device_train_batch_size = 4,
+        gradient_accumulation_steps = 4,
+        num_train_epochs=1,
+        warmup_steps = 5,
+        learning_rate = 2e-4,
+        fp16 = not is_bfloat16_supported(),
+        bf16 = is_bfloat16_supported(),
+        logging_steps = 1,
+        optim = "adamw_8bit",
+        weight_decay = 0.01,
+        lr_scheduler_type = "cosine",
+        seed = 3407,
+        output_dir = "outputs",
+    ),
+)
+trainer_stats = trainer.train()
+                                                        
+model.save_pretrained("lora_model_remap3hrs") # Local saving
+tokenizer.save_pretrained("lora_model_remap3hrs")
+# model.push_to_hub("your_name/lora_model", token = "...") # Online saving
+# tokenizer.push_to_hub("your_name/lora_model", token = "...") # Online saving                     
+
