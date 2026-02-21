@@ -1,0 +1,32 @@
+#LASSO Logistic Regression for Feature Selection
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+import pandas as pd
+import numpy as np
+
+# Prepare data
+candidate_features = ['VD', 'Tortuosity', 'FractalDim', 'FluxDeficit', 'PTR', 'FRC', 'AI', 'FDR', 'SIA', 'GAI', 'RGCI']
+X = df[candidate_features].fillna(0)  # replace NaN with 0 or impute
+y = df['LabelBinary']
+
+# Standardize features
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Train/test split (stratified to preserve class distribution)
+X_train, X_test, y_train, y_test = train_test_split(
+    X_scaled, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# LASSO Logistic Regression
+lasso = LogisticRegression(penalty='l1', solver='saga', C=0.1, max_iter=5000)
+lasso.fit(X_train, y_train)
+
+# Get coefficients
+coef = pd.Series(lasso.coef_[0], index=candidate_features)
+print("LASSO coefficients:\n", coef)
+
+# Keep features with non-zero coefficients
+selected_features = coef[coef != 0].index.tolist()
+print("Selected features after LASSO:", selected_features)
