@@ -103,3 +103,32 @@ print(df_final.head())
 # Save
 df_final.to_csv("final_multimodal_features.csv", index=False)
 print("📁 Saved: final_multimodal_features.csv")
+
+import pandas as pd
+
+# Load your saved dataset
+df_final = pd.read_csv("final_multimodal_features.csv")
+
+# Drop duplicate intermediate columns
+df_final = df_final.drop(columns=[c for c in df_final.columns if c.endswith('_x')])
+
+# Rename the _y columns cleanly
+df_final = df_final.rename(columns={
+    'Label_y': 'Label',
+    'VesselLength_y': 'VesselLength',
+    'Tortuosity_y': 'Tortuosity',
+    'FractalDim_y': 'FractalDim',
+    'FluxDeficit_y': 'FluxDeficit'
+})
+
+# Reorder for clarity
+cols = ['SNO', 'Label', 'VesselLength', 'Tortuosity', 'FractalDim', 'FluxDeficit'] + \
+       [c for c in df_final.columns if c not in ['SNO', 'Label', 'VesselLength', 'Tortuosity', 'FractalDim', 'FluxDeficit']]
+df_final = df_final[cols]
+
+# Save clean version
+df_final.to_csv("final_multimodal_features_clean.csv", index=False)
+print(" Cleaned dataset saved: final_multimodal_features_clean.csv")
+print("Shape:", df_final.shape)
+print(df_final.head())
+
