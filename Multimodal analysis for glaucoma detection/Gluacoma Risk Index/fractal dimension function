@@ -1,0 +1,51 @@
+# ======================================
+# Imports and Setup
+# ======================================
+import os
+import numpy as np
+import pandas as pd
+import cv2
+from skimage.morphology import skeletonize
+from skimage.filters import threshold_otsu
+from skimage.measure import label, regionprops, shannon_entropy
+from skimage.util import img_as_ubyte
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.ndimage import distance_transform_edt
+from skimage import morphology
+from skimage.color import rgb2gray
+from skimage.morphology import binary_closing, disk
+
+sns.set(style="whitegrid")
+
+# ======================================
+# CUSTOM FUNCTION: boxcount for fractal dimension
+# ======================================
+def boxcount(Z, k):
+    """Count number of non-empty/non-full boxes of size k in 2D binary array Z."""
+    S = np.add.reduceat(
+        np.add.reduceat(Z, np.arange(0, Z.shape[0], k), axis=0),
+        np.arange(0, Z.shape[1], k), axis=1
+    )
+    return len(np.where((S > 0) & (S < k*k))[0])
+
+def fractal_dimension(Z):
+    """Compute fractal dimension of a binary image using box-counting method."""
+    assert len(Z.shape) == 2
+
+    # Convert to binary
+    Z = Z < threshold_otsu(Z)
+
+    # Minimal dimension of image
+    p = min(Z.shape)
+    n = 2**np.floor(np.log(p)/np.log(2))
+    n = int(n)
+    sizes = 2**np.arange(int(np.log(n)/np.log(2)), 1, -1)
+
+    counts = []
+    for size in sizes:
+        counts.append(boxcount(Z, size))
+
+    coeffs = np.polyfit(np.log(sizes), np.log(counts), 1)
+    return -coeffs[0]
+
