@@ -1,0 +1,6 @@
+#Convert Coefficients into Additive Risk Score
+# Choose a scaling factor to convert log-odds to points
+scaling_factor = 0.25  # adjust to get reasonable integer points
+
+risk_points = (final_coefs / scaling_factor).round().astype(int)
+print("Feature points for risk score:\n", risk_points)
