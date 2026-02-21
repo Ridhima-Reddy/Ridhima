@@ -1,0 +1,105 @@
+import os
+import cv2
+import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from skimage.color import rgb2gray
+from skimage.measure import shannon_entropy
+
+# ================================
+# PATH SETUP
+# ================================
+base_dir = "/raid/bsmse1/Ai in Medicine - Neeraja and Ridhima/Dataset"
+img_dirs = {
+    "Glaucoma": os.path.join(base_dir, "Glaucoma"),
+    "Normal": os.path.join(base_dir, "Normal")
+}
+
+# ================================
+# FEATURE EXTRACTION FUNCTIONS
+# ================================
+def extract_vessel_features(image_path):
+    """Extract vessel-related features from a fundus image."""
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Could not read {image_path}")
+    
+    # Convert to grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # --- Vessel Length (proxy using edge pixels)
+    edges = cv2.Canny(gray, 50, 150)
+    vessel_length = np.sum(edges > 0)
+    
+    # --- Tortuosity (ratio of edge perimeter to area)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    total_perimeter = np.sum([cv2.arcLength(cnt, True) for cnt in contours])
+    total_area = np.sum([cv2.contourArea(cnt) for cnt in contours]) + 1e-5
+    tortuosity = total_perimeter / total_area
+    
+    # --- Fractal Dimension (using box counting)
+    gray = rgb2gray(img)
+    Z = gray < np.mean(gray)
+    def boxcount(Z, k):
+        S = np.add.reduceat(
+            np.add.reduceat(Z, np.arange(0, Z.shape[0], k), axis=0),
+            np.arange(0, Z.shape[1], k), axis=1)
+        return len(np.where((S > 0) & (S < k * k))[0])
+    p = min(Z.shape)
+    n = 2 ** np.floor(np.log2(p))
+    sizes = 2 ** np.arange(int(np.log2(n)), 1, -1)
+    counts = [boxcount(Z, size) for size in sizes]
+    coeffs = np.polyfit(np.log(sizes), np.log(counts), 1)
+    fractal_dim = -coeffs[0]
+    
+    # --- Flux deficit (brightness proxy)
+    flux_deficit = 1 - np.mean(gray)
+    
+    return vessel_length, tortuosity, fractal_dim, flux_deficit
+
+
+# ================================
+# IMAGE FEATURE EXTRACTION LOOP
+# ================================
+features = []
+print("\n Extracting vessel features from images...\n")
+
+for label, folder in img_dirs.items():
+    print(f"Processing {label} images in: {folder}")
+    for fname in tqdm(os.listdir(folder)):
+        if not fname.lower().endswith(".png"):
+            continue
+
+        # Extract SNO (numeric ID) from filename like "378_OS.png"
+        try:
+            sno = int(fname.split("_")[0])
+        except:
+            continue
+
+        img_path = os.path.join(folder, fname)
+        try:
+            vessel_length, tortuosity, fractal_dim, flux_deficit = extract_vessel_features(img_path)
+            features.append([sno, label, vessel_length, tortuosity, fractal_dim, flux_deficit])
+        except Exception as e:
+            print(f"⚠️ Error processing {img_path}: {e}")
+            features.append([sno, label, np.nan, np.nan, np.nan, np.nan])
+
+df_features = pd.DataFrame(features, columns=["SNO", "Label", "VesselLength", "Tortuosity", "FractalDim", "FluxDeficit"])
+
+print("\n Feature extraction complete. Sample:")
+print(df_features.head())
+
+# ================================
+# MERGE WITH CLINICAL DATA
+# ================================
+# Assuming df is your merged multimodal table from Step 3
+# Merge on SNO
+df_final = pd.merge(df, df_features, on="SNO", how="left")
+
+print("\n Final merged dataset created.")
+print("Shape:", df_final.shape)
+print(df_final.head())
+
+# Save
+df_final.to_csv("final_multimodal_features.csv", index=False)
+print("📁 Saved: final_multimodal_features.csv")
