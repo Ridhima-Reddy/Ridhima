@@ -1,0 +1,191 @@
+# swin transformer + 5 fold CV..
+import os
+import random
+import shutil
+import tempfile
+from tqdm import tqdm
+import numpy as np
+
+from sklearn.model_selection import KFold
+from sklearn.metrics import roc_auc_score, accuracy_score, confusion_matrix
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Subset
+import torchvision.transforms as T
+from torchvision.datasets import ImageFolder
+import timm
+
+# ------------------------- DEVICE -------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
+# ------------------------- REPRODUCIBILITY -------------------------
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+# ------------------------- METRIC FUNCTION -------------------------
+def compute_metrics(y_true, y_probs, threshold=0.5):
+    y_true = np.array(y_true)
+    y_probs = np.array(y_probs)
+    auc = roc_auc_score(y_true, y_probs)
+    y_pred = (y_probs >= threshold).astype(int)
+    acc = accuracy_score(y_true, y_pred)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    sens = tp / (tp + fn) if (tp + fn) else 0
+    spec = tn / (tn + fp) if (tn + fp) else 0
+    return auc, acc, sens, spec
+
+# ------------------------- CREATE SWIN MODEL -------------------------
+def create_swin(model_name='swin_base_patch4_window7_224', pretrained=True):
+    model = timm.create_model(model_name, pretrained=pretrained, num_classes=1,
+                              drop_rate=0.2, drop_path_rate=0.2)
+    return model
+
+# ------------------------- TRAIN ONE FOLD -------------------------
+def train_one_fold(model, train_loader, val_loader, epochs=50, lr=1e-5):
+
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    scaler = torch.cuda.amp.GradScaler() if device.type == 'cuda' else None
+
+    best_auc = 0
+    patience = 10
+    patience_counter = 0
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        total_loss = 0
+
+        for imgs, labels in tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}"):
+            imgs, labels = imgs.to(device), labels.float().to(device)
+            optimizer.zero_grad()
+
+            if scaler:
+                with torch.cuda.amp.autocast():
+                    out = model(imgs).squeeze(1)
+                    loss = criterion(out, labels)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                out = model(imgs).squeeze(1)
+                loss = criterion(out, labels)
+                loss.backward()
+                optimizer.step()
+
+            total_loss += loss.item() * imgs.size(0)
+
+        scheduler.step()
+
+        # ------------------------- Validation -------------------------
+        model.eval()
+        all_probs, all_labels = [], []
+        with torch.no_grad():
+            for imgs, labels in val_loader:
+                imgs = imgs.to(device)
+                out = torch.sigmoid(model(imgs).squeeze(1)).cpu()
+                all_probs.extend(out)
+                all_labels.extend(labels)
+
+        auc, acc, sens, spec = compute_metrics(all_labels, all_probs)
+        print(f"Fold Val: AUC {auc:.4f} | Acc {acc:.3f} | Sens {sens:.3f} | Spec {spec:.3f}")
+
+        # Track best model
+        if auc > best_auc:
+            best_auc = auc
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered")
+                break
+
+    return best_auc, acc, sens, spec
+
+
+# ------------------------- MAIN FUNCTION -------------------------
+def main_swin_5fold(data_dir="Ai in Medicine - Neeraja and Ridhima/Dataset",
+                    img_size=224, batch_size=32, epochs=50, lr=1e-5):
+
+    print("\n✅ Running SWIN TRANSFORMER with CLASSIC 5-FOLD CV")
+    set_seed(42)
+
+    # ---------------- CLEAN DATASET ----------------
+    valid_class_dirs = [d for d in os.listdir(data_dir)
+                        if os.path.isdir(os.path.join(data_dir, d)) and not d.startswith('.')]
+
+    clean_root = tempfile.mkdtemp(prefix="fundus_clean_")
+    for cls in valid_class_dirs:
+        shutil.copytree(os.path.join(data_dir, cls), os.path.join(clean_root, cls))
+
+    # ---------------- TRANSFORMS ----------------
+    train_t = T.Compose([
+        T.Resize((img_size, img_size)),
+        T.RandomHorizontalFlip(p=0.5),
+        T.RandomRotation(15),
+        T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.05),
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+    val_t = T.Compose([
+        T.Resize((img_size, img_size)),
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+    # ---------------- LOAD DATASET ----------------
+    full_dataset = ImageFolder(clean_root, transform=train_t)
+    print(f"✅ Loaded {len(full_dataset)} images | Classes: {full_dataset.classes}")
+
+    # ---------------- 5-FOLD SPLIT ----------------
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+    fold_results = []
+
+    for fold, (train_idx, val_idx) in enumerate(kf.split(full_dataset)):
+        print("\n============================")
+        print(f"       FOLD {fold+1}/5")
+        print("============================")
+
+        # Subsets
+        train_subset = Subset(full_dataset, train_idx)
+        val_subset = Subset(full_dataset, val_idx)
+        val_subset.dataset.transform = val_t
+
+        train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=4)
+        val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=4)
+
+        # Model per fold
+        model = create_swin().to(device)
+
+        auc, acc, sens, spec = train_one_fold(model, train_loader, val_loader,
+                                              epochs=epochs, lr=lr)
+
+        print(f"✅ Fold {fold+1} → AUC {auc:.4f} | Acc {acc:.3f} | Sens {sens:.3f} | Spec {spec:.3f}")
+        fold_results.append([auc, acc, sens, spec])
+
+    # ---------------- RESULTS ----------------
+    fold_results = np.array(fold_results)
+    mean_auc, mean_acc, mean_sens, mean_spec = fold_results.mean(axis=0)
+
+    print("\n============================")
+    print(" FINAL 5-FOLD RESULTS")
+    print("============================")
+    print(f"🏆 Mean AUC:          {mean_auc:.4f}")
+    print(f"🎯 Mean Accuracy:     {mean_acc:.3f}")
+    print(f"❤️ Mean Sensitivity:  {mean_sens:.3f}")
+    print(f"🛡️ Mean Specificity:  {mean_spec:.3f}")
+
+    shutil.rmtree(clean_root)
+
+
+# ------------------------- RUN -------------------------
+if __name__ == "__main__":
+    main_swin_5fold()
