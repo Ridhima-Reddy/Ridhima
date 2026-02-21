@@ -1,0 +1,60 @@
+# ======================================
+# Vessel Feature Extraction (with Fractal Dimension)
+# ======================================
+
+def vessel_features(img_path):
+    """
+    Extract quantitative vascular features from a retinal fundus image:
+    - Vessel Skeleton Length (VSL)
+    - Tortuosity Index (TORT)
+    - Fractal Dimension (FD)
+    - Flux Deficit Index (FDI)
+    """
+    try:
+        # ---- Load and preprocess ----
+        img = cv2.imread(img_path)
+        if img is None:
+            return np.nan, np.nan, np.nan, np.nan
+
+        gray = rgb2gray(img)
+        gray = (gray * 255).astype(np.uint8)
+
+        # ---- Binary vessel segmentation using Otsu ----
+        thresh = threshold_otsu(gray)
+        binary = gray > thresh
+        binary = morphology.remove_small_objects(binary, 50)
+        binary = binary_closing(binary, disk(2))
+
+        # ---- Vessel skeleton ----
+        skeleton = skeletonize(binary)
+
+        # ---- Vessel Skeleton Length (VSL) ----
+        vsl = np.sum(skeleton) / (gray.shape[0] * gray.shape[1])  # normalized by area
+
+        # ---- Tortuosity Index ----
+        # Extract vessel segments
+        labeled = label(skeleton)
+        tortuosity_list = []
+        for region in regionprops(labeled):
+            coords = region.coords
+            if len(coords) > 5:
+                geo_len = 0
+                for i in range(1, len(coords)):
+                    geo_len += euclidean(coords[i], coords[i-1])
+                euclid_len = euclidean(coords[0], coords[-1]) + 1e-6
+                tortuosity = (geo_len / euclid_len) - 1
+                tortuosity_list.append(tortuosity)
+        TORT = np.mean(tortuosity_list) if len(tortuosity_list) > 0 else np.nan
+
+        # ---- Fractal Dimension (FD) ----
+        FD = fractal_dimension(binary)
+
+        # ---- Flux Deficit Index (FDI) ----
+        inv = ~binary
+        fdi = np.sum(inv) / inv.size
+
+        return vsl, TORT, FD, fdi
+
+    except Exception as e:
+        print(f"⚠️ Error processing {img_path}: {e}")
+        return np.nan, np.nan, np.nan, np.nan
