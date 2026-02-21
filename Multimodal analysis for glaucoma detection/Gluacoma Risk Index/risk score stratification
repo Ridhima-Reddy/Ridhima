@@ -1,58 +1,104 @@
-#to visualize our risk score and predicted probability, and see how well it separates Normal and Glaucoma patients
+# ==============================
+# Risk Stratification, Interpretability & Visualization
+# ==============================
+
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-# If your 'Label' column exists, map it to binary
-df['LabelBinary'] = df['Label'].map({'Normal': 0, 'Glaucoma': 1})
+from sklearn.metrics import confusion_matrix, roc_auc_score, roc_curve
 
-# Now you can separate the groups
-df_glaucoma = df[df['LabelBinary'] == 1]
-df_normal = df[df['LabelBinary'] == 0]
+sns.set(style="whitegrid")
 
-print("Glaucoma count:", len(df_glaucoma))
-print("Normal count:", len(df_normal))
+# ------------------------------
+# 1️. Risk Stratification
+# ------------------------------
 
-
-# 1️. Separate the groups
-df_glaucoma = df[df['LabelBinary'] == 1]
-df_normal = df[df['LabelBinary'] == 0]
-
-# 2️. Visualize RiskScore distributions
-plt.figure(figsize=(10,6))
-sns.histplot(df_glaucoma['RiskScore'], color='red', label='Glaucoma', kde=True, stat='density', bins=30)
-sns.histplot(df_normal['RiskScore'], color='green', label='Normal', kde=True, stat='density', bins=30)
-plt.title("Risk Score Distribution by Label")
-plt.xlabel("Risk Score")
-plt.ylabel("Density")
-plt.legend()
-plt.show()
-
-# 3️. Visualize Predicted Probability distributions
-plt.figure(figsize=(10,6))
-sns.histplot(df_glaucoma['PredictedProb'], color='red', label='Glaucoma', kde=True, stat='density', bins=30)
-sns.histplot(df_normal['PredictedProb'], color='green', label='Normal', kde=True, stat='density', bins=30)
-plt.title("Predicted Probability Distribution by Label")
-plt.xlabel("Predicted Probability")
-plt.ylabel("Density")
-plt.legend()
-plt.show()
-
-# 4️. Define interpretable risk categories
-# Example thresholds (you can refine based on histogram overlap)
-def risk_category(prob):
-    if prob >= 0.8:
-        return "High Risk"
-    elif prob >= 0.5:
-        return "Medium Risk"
+# Example: Low, Medium, High based on scaled RiskScore
+def categorize_risk(score):
+    if score < 5:
+        return "Low"
+    elif score < 8:
+        return "Medium"
     else:
-        return "Low Risk"
+        return "High"
 
-df['RiskCategory'] = df['PredictedProb'].apply(risk_category)
+df['RiskCategory'] = df['RiskScore_scaled'].apply(categorize_risk)
 
-# 5️. Inspect counts per category
-print(df['RiskCategory'].value_counts())
+# Contingency table
+risk_table = pd.crosstab(df['RiskCategory'], df['Label'], margins=True)
+print("Risk category vs Label counts:")
+print(risk_table)
 
-# 6️. Optional: Boxplot for RiskScore by RiskCategory
+risk_table_pct = pd.crosstab(df['RiskCategory'], df['Label'], normalize='index') * 100
+print("\nPercentage distribution:")
+print(risk_table_pct.round(2))
+
+# ------------------------------
+# 2️. Interpretability
+# ------------------------------
+
+# Feature contributions using risk points
+selected_features = ['FractalDim', 'PTR', 'FRC', 'AI', 'FDR', 'SIA', 'GAI']
+risk_points = pd.Series([1, -1, 6, 1, 4, 2, 4], index=selected_features)
+
 plt.figure(figsize=(8,5))
-sns.boxplot(x='RiskCategory', y='RiskScore', data=df, order=["Low Risk", "Medium Risk", "High Risk"])
+risk_points.plot(kind='bar', color='skyblue', title='Feature Contribution to Risk Score')
+plt.ylabel("Risk Points")
+plt.show()
+
+# ------------------------------
+# 3️. Visualize Scores by Label
+# ------------------------------
+
+# Risk Score distribution
+plt.figure(figsize=(8,5))
+sns.histplot(df, x='RiskScore_scaled', hue='Label', kde=True, bins=20, palette=['green','red'])
+plt.title("Risk Score Distribution by Label")
+plt.xlabel("Risk Score (Scaled)")
+plt.show()
+
+# Predicted Probability distribution
+plt.figure(figsize=(8,5))
+sns.histplot(df, x='PredictedProb_scaled', hue='Label', kde=True, bins=20, palette=['green','red'])
+plt.title("Predicted Probability Distribution by Label")
+plt.xlabel("Predicted Probability (Scaled)")
+plt.show()
+
+# Boxplot of Risk Score by Risk Category
+plt.figure(figsize=(8,5))
+sns.boxplot(data=df, x='RiskCategory', y='RiskScore_scaled', hue='Label', palette=['green','red'])
 plt.title("Risk Score by Risk Category")
+plt.ylabel("Risk Score (Scaled)")
+plt.show()
+
+# ------------------------------
+# 4️. Summary Insights & Metrics
+# ------------------------------
+
+# Sensitivity / Specificity using High risk as positive
+df['HighRiskFlag'] = df['RiskCategory'] == 'High'
+y_true = df['Label'].map({'Normal':0, 'Glaucoma':1})
+y_pred = df['HighRiskFlag'].astype(int)
+
+conf_matrix = confusion_matrix(y_true, y_pred)
+tn, fp, fn, tp = conf_matrix.ravel()
+sensitivity = tp / (tp + fn)
+specificity = tn / (tn + fp)
+accuracy = (tp + tn) / (tp + tn + fp + fn)
+roc_auc = roc_auc_score(y_true, df['PredictedProb_scaled'])
+
+print("\nConfusion Matrix (High Risk as Positive):")
+print(conf_matrix)
+print(f"Sensitivity: {sensitivity:.2f}, Specificity: {specificity:.2f}, Accuracy: {accuracy:.2f}")
+print(f"AUC-ROC: {roc_auc:.2f}")
+
+# Optional: ROC curve
+fpr, tpr, thresholds = roc_curve(y_true, df['PredictedProb_scaled'])
+plt.figure(figsize=(6,6))
+plt.plot(fpr, tpr, label=f'AUC = {roc_auc:.2f}')
+plt.plot([0,1], [0,1], 'k--')
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curve")
+plt.legend(loc="lower right")
 plt.show()
