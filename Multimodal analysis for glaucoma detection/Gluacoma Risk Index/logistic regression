@@ -1,0 +1,14 @@
+#Train Final Logistic Regression on Selected Features
+from sklearn.linear_model import LogisticRegression
+
+# Get indices of selected features
+selected_features = ['FractalDim', 'PTR', 'FRC', 'AI', 'FDR', 'SIA', 'GAI']
+selected_indices = [candidate_features.index(f) for f in selected_features]
+
+# Train logistic regression
+final_model = LogisticRegression()
+final_model.fit(X_train[:, selected_indices], y_train)
+
+# Extract coefficients
+final_coefs = pd.Series(final_model.coef_[0], index=selected_features)
+print("Final logistic regression coefficients:\n", final_coefs)
