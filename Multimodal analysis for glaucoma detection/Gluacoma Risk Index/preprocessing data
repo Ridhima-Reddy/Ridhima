@@ -1,0 +1,48 @@
+# ======================================
+# Load CSVs
+# ======================================
+
+import pandas as pd
+
+df_bf = pd.read_csv("/raid/bsmse1/Ai in Medicine - Neeraja and Ridhima/blood flow.csv")
+df_rnfl = pd.read_csv("/raid/bsmse1/Ai in Medicine - Neeraja and Ridhima/RNFL .csv")
+
+print("Blood flow columns:", df_bf.columns)
+print("RNFL columns:", df_rnfl.columns)
+
+# ======================================
+# Merge the two tables using SNO
+# ======================================
+
+# First, clean up column names to remove accidental spaces or hidden characters
+df_bf.columns = df_bf.columns.str.strip()
+df_rnfl.columns = df_rnfl.columns.str.strip()
+
+# Merge on SNO (the shared ID)
+df = pd.merge(df_bf, df_rnfl, on="SNO", how="inner")
+
+print("Merged shape:", df.shape)
+df.head()
+
+# ======================================
+# Clean numeric columns
+# ======================================
+
+# Convert all numeric-looking columns to float safely
+for col in df.columns:
+    # Try to convert every column except date-like or categorical ones
+    if df[col].dtype == 'object':
+        df[col] = (
+            df[col]
+            .replace(r"[^0-9.\-]", "", regex=True)  # remove stray chars
+            .replace("", np.nan)
+        )
+        try:
+            df[col] = df[col].astype(float)
+        except:
+            pass  # skip non-convertible columns
+
+# Verify conversion worked
+print("Numeric columns sample:")
+print(df.select_dtypes(include=[float, int]).columns.tolist()[:15])
+
