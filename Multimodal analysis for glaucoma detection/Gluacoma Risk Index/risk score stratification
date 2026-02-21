@@ -1,0 +1,58 @@
+#to visualize our risk score and predicted probability, and see how well it separates Normal and Glaucoma patients
+import matplotlib.pyplot as plt
+import seaborn as sns
+# If your 'Label' column exists, map it to binary
+df['LabelBinary'] = df['Label'].map({'Normal': 0, 'Glaucoma': 1})
+
+# Now you can separate the groups
+df_glaucoma = df[df['LabelBinary'] == 1]
+df_normal = df[df['LabelBinary'] == 0]
+
+print("Glaucoma count:", len(df_glaucoma))
+print("Normal count:", len(df_normal))
+
+
+# 1️. Separate the groups
+df_glaucoma = df[df['LabelBinary'] == 1]
+df_normal = df[df['LabelBinary'] == 0]
+
+# 2️. Visualize RiskScore distributions
+plt.figure(figsize=(10,6))
+sns.histplot(df_glaucoma['RiskScore'], color='red', label='Glaucoma', kde=True, stat='density', bins=30)
+sns.histplot(df_normal['RiskScore'], color='green', label='Normal', kde=True, stat='density', bins=30)
+plt.title("Risk Score Distribution by Label")
+plt.xlabel("Risk Score")
+plt.ylabel("Density")
+plt.legend()
+plt.show()
+
+# 3️. Visualize Predicted Probability distributions
+plt.figure(figsize=(10,6))
+sns.histplot(df_glaucoma['PredictedProb'], color='red', label='Glaucoma', kde=True, stat='density', bins=30)
+sns.histplot(df_normal['PredictedProb'], color='green', label='Normal', kde=True, stat='density', bins=30)
+plt.title("Predicted Probability Distribution by Label")
+plt.xlabel("Predicted Probability")
+plt.ylabel("Density")
+plt.legend()
+plt.show()
+
+# 4️. Define interpretable risk categories
+# Example thresholds (you can refine based on histogram overlap)
+def risk_category(prob):
+    if prob >= 0.8:
+        return "High Risk"
+    elif prob >= 0.5:
+        return "Medium Risk"
+    else:
+        return "Low Risk"
+
+df['RiskCategory'] = df['PredictedProb'].apply(risk_category)
+
+# 5️. Inspect counts per category
+print(df['RiskCategory'].value_counts())
+
+# 6️. Optional: Boxplot for RiskScore by RiskCategory
+plt.figure(figsize=(8,5))
+sns.boxplot(x='RiskCategory', y='RiskScore', data=df, order=["Low Risk", "Medium Risk", "High Risk"])
+plt.title("Risk Score by Risk Category")
+plt.show()
