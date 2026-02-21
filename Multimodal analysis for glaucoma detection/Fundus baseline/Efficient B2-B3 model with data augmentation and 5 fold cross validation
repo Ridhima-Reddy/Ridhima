@@ -1,0 +1,403 @@
+###EFFICIENT B2-B3 MODEL with data augmentation and 5-fold cross validation
+
+import os
+import random
+import shutil
+import tempfile
+from pathlib import Path
+from tqdm import tqdm
+
+import torch
+import torch.nn as nn
+from torch.utils.data import random_split, DataLoader, Dataset, Subset
+import torchvision.transforms as T
+import torchvision.models as models
+from torchvision.datasets import ImageFolder
+from sklearn.metrics import roc_auc_score, accuracy_score, confusion_matrix
+from sklearn.model_selection import KFold
+import cv2
+import numpy as np
+
+# Force CUDA device 4 if available
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+else:
+    device = torch.device("cpu")
+
+print("Using device:", device)
+
+# -------------------------
+def set_seed(seed=42):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def compute_metrics(y_true, y_probs, threshold=0.5):
+    y_true = torch.tensor(y_true).numpy()
+    y_probs = torch.tensor(y_probs).numpy()
+    auc = roc_auc_score(y_true, y_probs)
+    y_pred = (y_probs >= threshold).astype(int)
+    acc = accuracy_score(y_true, y_pred)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    sens = tp / (tp + fn)
+    spec = tn / (tn + fp)
+    return auc, acc, sens, spec
+
+def clean_dataset_directory(data_dir):
+    """Create a clean dataset directory without hidden folders"""
+    clean_root = tempfile.mkdtemp(prefix="clean_fundus_")
+    
+    # Get valid class directories (exclude hidden folders like .ipynb_checkpoints)
+    valid_classes = [d for d in os.listdir(data_dir) 
+                     if os.path.isdir(os.path.join(data_dir, d)) 
+                     and not d.startswith('.')]
+    
+    print(f"📁 Found valid classes: {valid_classes}")
+    
+    for cls in valid_classes:
+        src_dir = os.path.join(data_dir, cls)
+        dst_dir = os.path.join(clean_root, cls)
+        os.makedirs(dst_dir, exist_ok=True)
+        
+        # Copy only image files, exclude hidden files
+        image_files = [f for f in os.listdir(src_dir) 
+                      if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'))
+                      and not f.startswith('.')]
+        
+        print(f"📸 Copying {len(image_files)} images from {cls}...")
+        for img_file in image_files:
+            src_path = os.path.join(src_dir, img_file)
+            dst_path = os.path.join(dst_dir, img_file)
+            shutil.copy2(src_path, dst_path)
+    
+    return clean_root, valid_classes
+
+class SimpleFundusDataset(Dataset):
+    """Simple dataset that directly resizes images without ROI detection"""
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        
+        # Load the original dataset structure
+        self.original_dataset = ImageFolder(root_dir)
+        self.classes = self.original_dataset.classes
+        self.class_to_idx = self.original_dataset.class_to_idx
+        self.samples = self.original_dataset.samples
+        
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        img_path, label = self.samples[idx]
+        
+        # Load image using PIL for compatibility with torchvision transforms
+        from PIL import Image
+        image = Image.open(img_path).convert('RGB')
+        
+        if self.transform:
+            image = self.transform(image)
+            
+        return image, label
+
+def train_model_for_fold(model, train_loader, val_loader, fold, epochs=30, lr=1e-4):
+    """Train model for a specific fold"""
+    criterion = nn.BCEWithLogitsLoss()
+    
+    # Two-stage optimizer strategy
+    optimizer_stage1 = torch.optim.AdamW([
+        {'params': model.features.parameters(), 'lr': lr/10},  # Lower LR for features
+        {'params': model.classifier.parameters(), 'lr': lr}     # Higher LR for classifier
+    ], weight_decay=1e-4)
+    
+    optimizer_stage2 = torch.optim.AdamW(model.parameters(), lr=lr/10, weight_decay=1e-4)
+    
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_stage1, mode='max', factor=0.5, patience=3)
+    
+    best_auc = 0.0
+    best_metrics = {}
+    fold_model_path = f"Ai in Medicine - Neeraja and Ridhima/best_efficientnet_fold_{fold}.pth"
+
+    # ---------------- Two-Stage Training Loop ----------------
+    print(f"\n🚀 Starting Stage 1: Feature Extraction (frozen backbone) for Fold {fold}...")
+    
+    # Stage 1: Freeze backbone, train only classifier
+    for param in model.features.parameters():
+        param.requires_grad = False
+    
+    for epoch in range(1, epochs//2 + 1):
+        model.train()
+        total_loss = 0
+        
+        for imgs, labels in tqdm(train_loader, desc=f"Fold {fold} Stage1 Epoch {epoch}/{epochs//2}"):
+            imgs, labels = imgs.to(device), labels.float().to(device)
+            optimizer_stage1.zero_grad()
+            out = model(imgs).squeeze(1)
+            loss = criterion(out, labels)
+            loss.backward()
+            optimizer_stage1.step()
+            total_loss += loss.item() * imgs.size(0)
+        
+        avg_loss = total_loss / len(train_loader.dataset)
+
+        # Validation
+        model.eval()
+        all_probs, all_labels = [], []
+        with torch.no_grad():
+            for imgs, labels in val_loader:
+                imgs = imgs.to(device)
+                out = torch.sigmoid(model(imgs).squeeze(1)).cpu()
+                all_probs.extend(out)
+                all_labels.extend(labels)
+        
+        auc, acc, sens, spec = compute_metrics(all_labels, all_probs)
+        scheduler.step(auc)
+        
+        print(f"Fold {fold} Stage1 Epoch {epoch} | Loss {avg_loss:.4f} | Val AUC {auc:.4f} | Acc {acc:.3f} | Sens {sens:.3f} | Spec {spec:.3f}")
+        print(f"Learning Rate: {optimizer_stage1.param_groups[0]['lr']:.2e}")
+
+        if auc > best_auc:
+            best_auc = auc
+            best_metrics = {'auc': auc, 'acc': acc, 'sens': sens, 'spec': spec}
+            torch.save(model.state_dict(), fold_model_path)
+            print(f"✅ Saved best model for fold {fold}")
+
+    print(f"\n🔥 Starting Stage 2: Fine-tuning (unfrozen backbone) for Fold {fold}...")
+    
+    # Stage 2: Unfreeze all layers for fine-tuning
+    for param in model.parameters():
+        param.requires_grad = True
+    
+    # Use lower learning rate for fine-tuning
+    for g in optimizer_stage2.param_groups:
+        g['lr'] = lr / 10
+
+    for epoch in range(epochs//2 + 1, epochs + 1):
+        model.train()
+        total_loss = 0
+        
+        for imgs, labels in tqdm(train_loader, desc=f"Fold {fold} Stage2 Epoch {epoch}/{epochs}"):
+            imgs, labels = imgs.to(device), labels.float().to(device)
+            optimizer_stage2.zero_grad()
+            out = model(imgs).squeeze(1)
+            loss = criterion(out, labels)
+            loss.backward()
+            optimizer_stage2.step()
+            total_loss += loss.item() * imgs.size(0)
+        
+        avg_loss = total_loss / len(train_loader.dataset)
+
+        # Validation
+        model.eval()
+        all_probs, all_labels = [], []
+        with torch.no_grad():
+            for imgs, labels in val_loader:
+                imgs = imgs.to(device)
+                out = torch.sigmoid(model(imgs).squeeze(1)).cpu()
+                all_probs.extend(out)
+                all_labels.extend(labels)
+        
+        auc, acc, sens, spec = compute_metrics(all_labels, all_probs)
+        
+        print(f"Fold {fold} Stage2 Epoch {epoch} | Loss {avg_loss:.4f} | Val AUC {auc:.4f} | Acc {acc:.3f} | Sens {sens:.3f} | Spec {spec:.3f}")
+        print(f"Learning Rate: {optimizer_stage2.param_groups[0]['lr']:.2e}")
+
+        if auc > best_auc:
+            best_auc = auc
+            best_metrics = {'auc': auc, 'acc': acc, 'sens': sens, 'spec': spec}
+            torch.save(model.state_dict(), fold_model_path)
+            print(f"✅ Saved best model for fold {fold}")
+
+    return best_metrics, fold_model_path
+
+# -------------------------
+def main(data_dir="Ai in Medicine - Neeraja and Ridhima/Dataset",
+         img_size=224, batch_size=32, epochs=30, lr=1e-4,
+         val_split=0.15, n_splits=5):
+    
+    print("Device:", device)
+    set_seed(42)
+
+    # ---------------- Inspect folder structure ----------------
+    print(f"\n📁 Looking inside data directory: {data_dir}")
+    if not os.path.exists(data_dir):
+        raise FileNotFoundError(f"❌ Data directory not found: {data_dir}")
+
+    print("Subfolders found:")
+    for item in os.listdir(data_dir):
+        path = os.path.join(data_dir, item)
+        if os.path.isdir(path):
+            # Count only image files, exclude hidden files
+            image_files = [f for f in os.listdir(path) 
+                          if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'))
+                          and not f.startswith('.')]
+            print(f" - {item}/  ({len(image_files)} image files)")
+        else:
+            print(f" - {item} (file)")
+
+    print("\n🔍 Checking for image samples in each folder:")
+    for cls in os.listdir(data_dir):
+        cls_path = os.path.join(data_dir, cls)
+        if not os.path.isdir(cls_path) or cls.startswith('.'):
+            continue
+        imgs = [f for f in os.listdir(cls_path) 
+                if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'))
+                and not f.startswith('.')]
+        print(f"Class: {cls} | Found {len(imgs)} images")
+        if imgs:
+            print("  e.g. →", imgs[:3])
+
+    # ---------------- Clean dataset directory ----------------
+    print("\n🧹 Creating clean dataset directory...")
+    clean_data_dir, valid_classes = clean_dataset_directory(data_dir)
+    print(f"✅ Clean dataset created at: {clean_data_dir}")
+    print(f"📊 Valid classes for training: {valid_classes}")
+
+    if len(valid_classes) < 2:
+        raise RuntimeError(f"❌ Expected ≥2 class folders but found: {valid_classes}")
+
+    # ---------------- Enhanced Data Transforms ----------------
+    train_t = T.Compose([
+        T.Resize((img_size, img_size)),
+        T.RandomHorizontalFlip(p=0.5),
+        T.RandomVerticalFlip(p=0.2),
+        T.RandomRotation(degrees=15),
+        T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.02),
+        T.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+    
+    val_t = T.Compose([
+        T.Resize((img_size, img_size)),
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+    # ---------------- Load dataset with direct resizing ----------------
+    print("\n🖼️ Loading dataset with direct resizing...")
+    full_dataset = SimpleFundusDataset(root_dir=clean_data_dir, transform=train_t)
+    print(f"✅ Dataset loaded successfully with {len(full_dataset)} total images")
+    print(f"Classes detected: {full_dataset.classes}")
+
+    # ---------------- 5-Fold Cross Validation ----------------
+    print(f"\n🎯 Starting {n_splits}-Fold Cross Validation...")
+    
+    # Create KFold splitter
+    kfold = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    
+    # Store results for each fold
+    fold_results = []
+    all_test_metrics = []
+    
+    for fold, (train_idx, test_idx) in enumerate(kfold.split(full_dataset)):
+        print(f"\n{'='*60}")
+        print(f"🔄 Processing Fold {fold + 1}/{n_splits}")
+        print(f"{'='*60}")
+        
+        # Split train_idx further into train and validation
+        n_train = len(train_idx)
+        n_val = int(val_split * n_train)
+        n_train_final = n_train - n_val
+        
+        # Shuffle train indices for val split
+        np.random.shuffle(train_idx)
+        train_indices = train_idx[:n_train_final]
+        val_indices = train_idx[n_train_final:]
+        
+        # Create subsets for this fold
+        train_subset = Subset(full_dataset, train_indices)
+        val_subset = Subset(full_dataset, val_indices)
+        test_subset = Subset(full_dataset, test_idx)
+        
+        # Apply val transform to validation and test sets
+        val_subset.dataset.transform = val_t
+        test_subset.dataset.transform = val_t
+        
+        # Create data loaders
+        train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+        val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+        test_loader = DataLoader(test_subset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+        
+        print(f"📊 Fold {fold + 1} Dataset Sizes:")
+        print(f"   Training: {len(train_subset)} images")
+        print(f"   Validation: {len(val_subset)} images")
+        print(f"   Testing: {len(test_subset)} images")
+        
+        # ---------------- Initialize Model for this fold ----------------
+        model = models.efficientnet_b2(pretrained=True)
+        model.classifier = nn.Sequential(
+            nn.Dropout(p=0.3, inplace=True),
+            nn.Linear(model.classifier[1].in_features, 1)
+        )
+        model = model.to(device)
+        
+        # Train model for this fold
+        best_val_metrics, model_path = train_model_for_fold(
+            model, train_loader, val_loader, fold + 1, epochs, lr
+        )
+        
+        # ---------------- Test Evaluation for this fold ----------------
+        print(f"\n📊 Evaluating Fold {fold + 1} on test set...")
+        model.load_state_dict(torch.load(model_path))
+        model.eval()
+        all_probs, all_labels = [], []
+        with torch.no_grad():
+            for imgs, labels in test_loader:
+                imgs = imgs.to(device)
+                out = torch.sigmoid(model(imgs).squeeze(1)).cpu()
+                all_probs.extend(out)
+                all_labels.extend(labels)
+        
+        test_auc, test_acc, test_sens, test_spec = compute_metrics(all_labels, all_probs)
+        
+        fold_metrics = {
+            'fold': fold + 1,
+            'test_auc': test_auc,
+            'test_acc': test_acc,
+            'test_sens': test_sens,
+            'test_spec': test_spec,
+            'best_val_auc': best_val_metrics['auc']
+        }
+        
+        fold_results.append(fold_metrics)
+        all_test_metrics.append([test_auc, test_acc, test_sens, test_spec])
+        
+        print(f"🎯 Fold {fold + 1} Test Results:")
+        print(f"   AUC: {test_auc:.4f}")
+        print(f"   Accuracy: {test_acc:.3f}")
+        print(f"   Sensitivity: {test_sens:.3f}")
+        print(f"   Specificity: {test_spec:.3f}")
+    
+    # ---------------- Final Cross-Validation Results ----------------
+    print(f"\n{'='*80}")
+    print("🎯 5-FOLD CROSS VALIDATION FINAL RESULTS")
+    print(f"{'='*80}")
+    
+    # Calculate mean and std for each metric
+    test_metrics_array = np.array(all_test_metrics)
+    mean_metrics = test_metrics_array.mean(axis=0)
+    std_metrics = test_metrics_array.std(axis=0)
+    
+    print(f"\n📊 Average Performance across {n_splits} folds:")
+    print(f"🏆 AUC:          {mean_metrics[0]:.4f} ± {std_metrics[0]:.4f}")
+    print(f"🎯 Accuracy:     {mean_metrics[1]:.3f} ± {std_metrics[1]:.3f}")
+    print(f"❤️  Sensitivity:  {mean_metrics[2]:.3f} ± {std_metrics[2]:.3f}")
+    print(f"🛡️  Specificity:  {mean_metrics[3]:.3f} ± {std_metrics[3]:.3f}")
+    
+    print(f"\n📈 Detailed Fold Results:")
+    for result in fold_results:
+        print(f"Fold {result['fold']}: "
+              f"AUC={result['test_auc']:.4f}, "
+              f"Acc={result['test_acc']:.3f}, "
+              f"Sens={result['test_sens']:.3f}, "
+              f"Spec={result['test_spec']:.3f}")
+    
+    # Cleanup temporary directories
+    try:
+        shutil.rmtree(clean_data_dir)
+    except:
+        pass
+
+# -------------------------
+if __name__ == "__main__":
+    main()
